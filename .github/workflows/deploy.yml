@@ -22,6 +22,10 @@ jobs:
       - name: Base64 encode HTML content
         id: encode
         run: |
+          if [ ! -s app/index.html ]; then
+            echo "❌ index.html is empty. Aborting deployment."
+            exit 1
+          fi
           HTML_CONTENT=$(base64 -w 0 app/index.html)
           echo "HTML_CONTENT=$HTML_CONTENT" >> $GITHUB_ENV
 
@@ -39,12 +43,18 @@ jobs:
 
       - name: Trigger ASG instance refresh
         run: |
+          # Get ASG name from CloudFormation outputs
           ASG_NAME=$(aws cloudformation describe-stacks \
             --stack-name MaxInfra \
             --query "Stacks[0].Outputs[?OutputKey=='AutoScalingGroupName'].OutputValue" \
             --output text)
 
+          if [ -z "$ASG_NAME" ]; then
+            echo "❌ ASG name not found in stack outputs. Make sure the template has an output for ASG."
+            exit 1
+          fi
+
           echo "Starting instance refresh for ASG: $ASG_NAME"
           aws autoscaling start-instance-refresh \
-            --auto-scaling-group-name $ASG_NAME \
+            --auto-scaling-group-name "$ASG_NAME" \
             --preferences '{"MinHealthyPercentage":0,"InstanceWarmup":60}'
