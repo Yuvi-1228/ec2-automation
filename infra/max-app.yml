@@ -11,6 +11,10 @@ Parameters:
     Default: t2.micro
     Description: EC2 instance type
 
+  REGION:
+    Type: String
+    Default: us-east-1
+
   AppName:
     Type: String
     Default: max-app
@@ -111,6 +115,10 @@ Resources:
       SecurityGroups:
         - !Ref InstanceSecurityGroup
       Scheme: internet-facing
+      Type: application
+      Tags:
+        - Key: Name
+          Value: !Sub "${AppName}-ALB"
 
   ALBTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -140,6 +148,33 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "${AppName}-deploy-bucket-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+
+  #####################################
+  # IAM Role for EC2 (CodeDeploy Agent)
+  #####################################
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2InstanceRole
 
   #####################################
   # Launch Template for EC2
@@ -150,6 +185,8 @@ Resources:
       LaunchTemplateData:
         ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
         InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
         KeyName: !Ref KeyName
         SecurityGroupIds:
           - !Ref InstanceSecurityGroup
@@ -157,13 +194,18 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             yum update -y
-            yum install -y httpd
+            yum install -y ruby wget httpd
             systemctl enable httpd
             systemctl start httpd
-            mkdir -p /var/www/html
-            serverip=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
-            echo "welcome to max this is from $serverip" > /var/www/html/index.html
 
+            # Install CodeDeploy agent
+            cd /home/ec2-user
+            REGION=${AWS::Region}
+            wget https://aws-codedeploy-${REGION}.s3.${REGION}.amazonaws.com/latest/install
+            chmod +x ./install
+            ./install auto
+            systemctl enable codedeploy-agent
+            systemctl start codedeploy-agent
 
   #####################################
   # Auto Scaling Group
@@ -182,6 +224,10 @@ Resources:
         Version: !GetAtt LaunchTemplate.LatestVersionNumber
       TargetGroupARNs:
         - !Ref ALBTargetGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AppName}-instance"
+          PropagateAtLaunch: true
 
   #####################################
   # CodeDeploy Setup

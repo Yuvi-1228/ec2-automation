@@ -7,6 +7,11 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      APPLICATION_NAME: ${{ secrets.CODEDEPLOY_APPLICATION_NAME }}
+      DEPLOYMENT_GROUP_NAME: ${{ secrets.CODEDEPLOY_DEPLOYMENT_GROUP_NAME }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      AWS_REGION: us-east-1  # Match your CloudFormation region
 
     steps:
       - name: Checkout repo
@@ -17,17 +22,151 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity --output table
 
       - name: Create deployment bundle
-        run: zip -r app.zip app appspec.yml scripts
+        run: |
+          set -e
+          echo "📦 Creating deployment package..."
+          zip -r app.zip app appspec.yml scripts
 
       - name: Upload to S3
-        run: aws s3 cp app.zip s3://my-max-app-bucket/app-${{ github.run_number }}.zip
+        run: |
+          set -e
+          KEY="app-${{ github.run_number }}.zip"
+          S3_BUCKET=${S3_BUCKET:-my-max-app-bucket}
+          echo "☁️ Uploading app.zip to s3://$S3_BUCKET/$KEY"
+          aws s3 cp app.zip "s3://$S3_BUCKET/$KEY"
+          echo "S3_KEY=$KEY" >> $GITHUB_ENV
+          echo "S3_BUCKET=$S3_BUCKET" >> $GITHUB_ENV
+
+      - name: Validate AWS resources before deployment
+        run: |
+          set -e
+          echo "🔍 Validating AWS resources..."
+
+          echo "Checking S3 bucket: $S3_BUCKET"
+          aws s3api head-bucket --bucket "$S3_BUCKET" >/dev/null
+
+          echo "Checking CodeDeploy Application: $APPLICATION_NAME"
+          aws deploy get-application --application-name "$APPLICATION_NAME" >/dev/null
+
+          echo "Checking Deployment Group: $DEPLOYMENT_GROUP_NAME"
+          aws deploy get-deployment-group \
+            --application-name "$APPLICATION_NAME" \
+            --deployment-group-name "$DEPLOYMENT_GROUP_NAME" >/dev/null
 
       - name: Trigger CodeDeploy deployment
         run: |
-          aws deploy create-deployment \
-            --application-name MaxApp-app \
-            --deployment-group-name MaxApp-dg \
-            --s3-location bucket=my-max-app-bucket,bundleType=zip,key=app-${{ github.run_number }}.zip
+          set -e
+          echo "🚀 Starting deployment..."
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name "$APPLICATION_NAME" \
+            --deployment-group-name "$DEPLOYMENT_GROUP_NAME" \
+            --s3-location bucket="$S3_BUCKET",bundleType=zip,key="$S3_KEY" \
+            --region "$AWS_REGION" \
+            --query "deploymentId" --output text)
+
+          echo "✅ Deployment started with ID: $DEPLOYMENT_ID"
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_ENV
+
+      - name: Monitor Deployment Status
+        run: |
+          set -e
+          echo "⏳ Monitoring deployment $DEPLOYMENT_ID ..."
+          if aws deploy wait deployment-successful --deployment-id "$DEPLOYMENT_ID"; then
+            echo "🎉 Deployment completed successfully!"
+          else
+            echo "❌ Deployment failed. Logs:"
+            aws deploy get-deployment --deployment-id "$DEPLOYMENT_ID"
+            exit 1
+          fi
+name: Deploy via CodeDeploy
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      APPLICATION_NAME: ${{ secrets.CODEDEPLOY_APPLICATION_NAME }}
+      DEPLOYMENT_GROUP_NAME: ${{ secrets.CODEDEPLOY_DEPLOYMENT_GROUP_NAME }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      AWS_REGION: ap-south-1  # Match your CloudFormation region
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity --output table
+
+      - name: Create deployment bundle
+        run: |
+          set -e
+          echo "📦 Creating deployment package..."
+          zip -r app.zip app appspec.yml scripts
+
+      - name: Upload to S3
+        run: |
+          set -e
+          KEY="app-${{ github.run_number }}.zip"
+          S3_BUCKET=${S3_BUCKET:-my-max-app-bucket}
+          echo "☁️ Uploading app.zip to s3://$S3_BUCKET/$KEY"
+          aws s3 cp app.zip "s3://$S3_BUCKET/$KEY"
+          echo "S3_KEY=$KEY" >> $GITHUB_ENV
+          echo "S3_BUCKET=$S3_BUCKET" >> $GITHUB_ENV
+
+      - name: Validate AWS resources before deployment
+        run: |
+          set -e
+          echo "🔍 Validating AWS resources..."
+
+          echo "Checking S3 bucket: $S3_BUCKET"
+          aws s3api head-bucket --bucket "$S3_BUCKET" >/dev/null
+
+          echo "Checking CodeDeploy Application: $APPLICATION_NAME"
+          aws deploy get-application --application-name "$APPLICATION_NAME" >/dev/null
+
+          echo "Checking Deployment Group: $DEPLOYMENT_GROUP_NAME"
+          aws deploy get-deployment-group \
+            --application-name "$APPLICATION_NAME" \
+            --deployment-group-name "$DEPLOYMENT_GROUP_NAME" >/dev/null
+
+      - name: Trigger CodeDeploy deployment
+        run: |
+          set -e
+          echo "🚀 Starting deployment..."
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name "$APPLICATION_NAME" \
+            --deployment-group-name "$DEPLOYMENT_GROUP_NAME" \
+            --s3-location bucket="$S3_BUCKET",bundleType=zip,key="$S3_KEY" \
+            --region "$AWS_REGION" \
+            --query "deploymentId" --output text)
+
+          echo "✅ Deployment started with ID: $DEPLOYMENT_ID"
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_ENV
+
+      - name: Monitor Deployment Status
+        run: |
+          set -e
+          echo "⏳ Monitoring deployment $DEPLOYMENT_ID ..."
+          if aws deploy wait deployment-successful --deployment-id "$DEPLOYMENT_ID"; then
+            echo "🎉 Deployment completed successfully!"
+          else
+            echo "❌ Deployment failed. Logs:"
+            aws deploy get-deployment --deployment-id "$DEPLOYMENT_ID"
+            exit 1
+          fi
