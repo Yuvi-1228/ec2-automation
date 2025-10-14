@@ -1,30 +1,22 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CloudFormation stack for Max app with Auto Scaling, ALB, and CodeDeploy integration.
+Description: Max App CloudFormation Stack with ASG and ALB
 
 Parameters:
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
-    Description: Name of an existing EC2 KeyPair to SSH into instances
-
+    Description: Name of an existing EC2 KeyPair
   InstanceType:
     Type: String
     Default: t2.micro
-    Description: EC2 instance type
-
-  REGION:
-    Type: String
-    Default: us-east-1
-
   AppName:
     Type: String
     Default: max-app
-    Description: Application name for tagging and resource naming
+  HtmlContent:
+    Type: String
+    Default: ""
+    Description: Base64 encoded HTML content for index.html
 
 Resources:
-
-  #####################################
-  # Networking (VPC + Subnets)
-  #####################################
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -34,15 +26,6 @@ Resources:
       Tags:
         - Key: Name
           Value: !Ref AppName
-
-  InternetGateway:
-    Type: AWS::EC2::InternetGateway
-
-  VPCGatewayAttachment:
-    Type: AWS::EC2::VPCGatewayAttachment
-    Properties:
-      VpcId: !Ref VPC
-      InternetGatewayId: !Ref InternetGateway
 
   PublicSubnet1:
     Type: AWS::EC2::Subnet
@@ -59,6 +42,15 @@ Resources:
       CidrBlock: 10.0.2.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
       MapPublicIpOnLaunch: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
@@ -85,9 +77,6 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
-  #####################################
-  # Security Group
-  #####################################
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -103,9 +92,6 @@ Resources:
           ToPort: 80
           CidrIp: 0.0.0.0/0
 
-  #####################################
-  # Application Load Balancer
-  #####################################
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -141,52 +127,12 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref ALBTargetGroup
 
-  #####################################
-  # S3 Bucket for CodeDeploy Artifacts
-  #####################################
-  AppBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub "${AppName}-deploy-bucket-${AWS::AccountId}"
-      VersioningConfiguration:
-        Status: Enabled
-
-  #####################################
-  # IAM Role for EC2 (CodeDeploy Agent)
-  #####################################
-  EC2InstanceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
-      Path: /
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
-
-  EC2InstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles:
-        - !Ref EC2InstanceRole
-
-  #####################################
-  # Launch Template for EC2
-  #####################################
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
       LaunchTemplateData:
         ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
         InstanceType: !Ref InstanceType
-        IamInstanceProfile:
-          Arn: !GetAtt EC2InstanceProfile.Arn
         KeyName: !Ref KeyName
         SecurityGroupIds:
           - !Ref InstanceSecurityGroup
@@ -194,22 +140,11 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             yum update -y
-            yum install -y ruby wget httpd
+            yum install -y httpd
             systemctl enable httpd
             systemctl start httpd
+            echo "${HtmlContent}" | base64 --decode > /var/www/html/index.html
 
-            # Install CodeDeploy agent
-            cd /home/ec2-user
-            REGION=${AWS::Region}
-            wget https://aws-codedeploy-${REGION}.s3.${REGION}.amazonaws.com/latest/install
-            chmod +x ./install
-            ./install auto
-            systemctl enable codedeploy-agent
-            systemctl start codedeploy-agent
-
-  #####################################
-  # Auto Scaling Group
-  #####################################
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -229,46 +164,11 @@ Resources:
           Value: !Sub "${AppName}-instance"
           PropagateAtLaunch: true
 
-  #####################################
-  # CodeDeploy Setup
-  #####################################
-  CodeDeployServiceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: codedeploy.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-      Path: /
-
-  CodeDeployApplication:
-    Type: AWS::CodeDeploy::Application
-    Properties:
-      ApplicationName: !Ref AppName
-      ComputePlatform: Server
-
-  CodeDeployDeploymentGroup:
-    Type: AWS::CodeDeploy::DeploymentGroup
-    Properties:
-      ApplicationName: !Ref CodeDeployApplication
-      DeploymentGroupName: !Sub "${AppName}-DG"
-      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
-      AutoScalingGroups:
-        - !Ref AutoScalingGroup
-      DeploymentStyle:
-        DeploymentType: IN_PLACE
-        DeploymentOption: WITHOUT_TRAFFIC_CONTROL
-
 Outputs:
   LoadBalancerDNS:
-    Description: Load balancer URL
+    Description: ALB DNS Name
     Value: !GetAtt ALB.DNSName
 
-  S3BucketName:
-    Description: S3 bucket for CodeDeploy artifacts
-    Value: !Ref AppBucket
+  AutoScalingGroupName:
+    Description: ASG Name
+    Value: !Ref AutoScalingGroup
