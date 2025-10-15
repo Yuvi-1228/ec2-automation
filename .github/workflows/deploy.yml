@@ -41,7 +41,7 @@ jobs:
                 AppName=max-app \
                 HtmlContent=$HTML_CONTENT
 
-      - name: Trigger ASG instance refresh
+      - name: Trigger ASG instance refresh (rolling, minimal downtime)
         run: |
           # Get ASG name from CloudFormation outputs
           ASG_NAME=$(aws cloudformation describe-stacks \
@@ -50,11 +50,24 @@ jobs:
             --output text)
 
           if [ -z "$ASG_NAME" ]; then
-            echo "❌ ASG name not found in stack outputs. Make sure the template has an output for ASG."
+            echo "❌ ASG name not found in stack outputs. Make sure your template outputs it."
             exit 1
           fi
 
-          echo "Starting instance refresh for ASG: $ASG_NAME"
+          echo "🔍 Checking existing instance refresh for ASG: $ASG_NAME"
+          REFRESH_STATUS=$(aws autoscaling describe-instance-refreshes \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --query "InstanceRefreshes[0].Status" \
+            --output text 2>/dev/null || echo "None")
+
+          if [ "$REFRESH_STATUS" == "InProgress" ]; then
+            echo "⚠️ Existing instance refresh already in progress — leaving it to complete to avoid downtime."
+            exit 0
+          fi
+
+          echo "🚀 Starting new rolling instance refresh for ASG: $ASG_NAME"
           aws autoscaling start-instance-refresh \
             --auto-scaling-group-name "$ASG_NAME" \
-            --preferences '{"MinHealthyPercentage":0,"InstanceWarmup":60}'
+            --preferences '{"MinHealthyPercentage":90,"InstanceWarmup":60}'
+
+          echo "✅ Instance refresh started successfully for $ASG_NAME"
