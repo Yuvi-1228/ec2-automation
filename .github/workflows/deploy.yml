@@ -31,6 +31,9 @@ jobs:
 
       - name: Update CloudFormation stack
         run: |
+          set -e
+          TIMESTAMP=$(date +%s)
+          echo "🔄 Deploying CloudFormation stack with BuildId=$TIMESTAMP"
           aws cloudformation deploy \
             --template-file infra/max-app.yml \
             --stack-name MaxInfra \
@@ -39,18 +42,19 @@ jobs:
                 KeyName=max-app-key \
                 InstanceType=t2.micro \
                 AppName=max-app \
-                HtmlContent=$HTML_CONTENT
+                HtmlContent=$HTML_CONTENT \
+                BuildId=$TIMESTAMP
 
       - name: Trigger ASG instance refresh (rolling, minimal downtime)
         run: |
-          # Get ASG name from CloudFormation outputs
+          set -e
           ASG_NAME=$(aws cloudformation describe-stacks \
             --stack-name MaxInfra \
             --query "Stacks[0].Outputs[?OutputKey=='AutoScalingGroupName'].OutputValue" \
             --output text)
 
           if [ -z "$ASG_NAME" ]; then
-            echo "❌ ASG name not found in stack outputs. Make sure your template outputs it."
+            echo "❌ ASG name not found in stack outputs."
             exit 1
           fi
 
@@ -61,13 +65,17 @@ jobs:
             --output text 2>/dev/null || echo "None")
 
           if [ "$REFRESH_STATUS" == "InProgress" ]; then
-            echo "⚠️ Existing instance refresh already in progress — leaving it to complete to avoid downtime."
+            echo "⚠️ Existing instance refresh in progress — leaving it to complete."
             exit 0
           fi
 
           echo "🚀 Starting new rolling instance refresh for ASG: $ASG_NAME"
           aws autoscaling start-instance-refresh \
             --auto-scaling-group-name "$ASG_NAME" \
-            --preferences '{"MinHealthyPercentage":90,"InstanceWarmup":60}'
+            --preferences '{
+              "MinHealthyPercentage": 90,
+              "InstanceWarmup": 60,
+              "SkipMatching": false
+            }'
 
           echo "✅ Instance refresh started successfully for $ASG_NAME"

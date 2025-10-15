@@ -15,6 +15,10 @@ Parameters:
     Type: String
     Default: ""
     Description: Base64 encoded HTML content for index.html
+  BuildId:
+    Type: String
+    Default: "0"
+    Description: Unique ID to force Launch Template version update
 
 Resources:
   VPC:
@@ -144,6 +148,12 @@ Resources:
             systemctl enable httpd
             systemctl start httpd
             echo "${HtmlContent}" | base64 --decode > /var/www/html/index.html
+            systemctl restart httpd
+        TagSpecifications:
+          - ResourceType: "instance"
+            Tags:
+              - Key: BuildId
+                Value: !Ref BuildId
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
